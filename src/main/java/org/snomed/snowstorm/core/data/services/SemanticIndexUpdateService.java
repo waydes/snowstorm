@@ -639,6 +639,16 @@ public class SemanticIndexUpdateService extends ComponentService implements Comm
 		return missingConceptIds;
 	}
 
+	public void clearBranchSemanticIndex(String path) {
+		logger.info("Clearing semantic index for branch {}.", path);
+		try (Commit commit = branchService.openCommit(path, "Clearing semantic index")) {
+			BranchCriteria branchCriteria = versionControlHelper.getBranchCriteria(path);
+			versionControlHelper.endAllVersionsOnThisBranch(QueryConcept.class, branchCriteria.getEntityBranchCriteria(QueryConcept.class), commit, queryConceptRepository);
+			commit.markSuccessful();
+		}
+		logger.info("Completed clearing semantic index for branch {}.", path);
+	}
+
 	private static final class AttributeChanges {
 
 		private static final Comparator<AttributeChange> comparator = Comparator

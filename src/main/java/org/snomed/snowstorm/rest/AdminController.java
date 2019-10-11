@@ -50,6 +50,12 @@ public class AdminController {
 		queryConceptUpdateService.rebuildStatedAndInferredSemanticIndex(BranchPathUriUtil.decodePath(branch));
 	}
 
+	@ApiOperation(value = "Clear the semantic index of the branch.")
+	@RequestMapping(value = "/{branch}/actions/clear-semantic-index", method = RequestMethod.POST)
+	public void clearBranchSemanticIndex(@PathVariable String branch) throws ServiceException {
+		queryConceptUpdateService.clearBranchSemanticIndex(BranchPathUriUtil.decodePath(branch));
+	}
+
 	@ApiOperation(value = "Force update of definition statuses of all concepts based on axioms.",
 			notes = "You are unlikely to need this action. " +
 					"If something has wrong with processing content updates on the branch the definition statuses " +
