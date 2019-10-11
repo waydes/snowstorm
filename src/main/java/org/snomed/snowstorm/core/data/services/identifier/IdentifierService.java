@@ -29,7 +29,7 @@ public class IdentifierService {
 	private static final String PARTITION_PART2_DESCRIPTION = "1";
 	private static final String PARTITION_PART2_RELATIONSHIP = "2";
 	
-	private static boolean suspendRegistrationProcess = false;
+	private static boolean suspendRegistrationProcess = true;
 	
 	@Autowired
 	private IdentifierCacheManager cacheManager;
