@@ -9,6 +9,7 @@ import io.kaicode.elasticvc.api.ComponentService;
 import io.kaicode.elasticvc.api.VersionControlHelper;
 import io.kaicode.elasticvc.domain.Branch;
 import io.kaicode.elasticvc.domain.Commit;
+import it.unimi.dsi.fastutil.longs.Long2ObjectLinkedOpenHashMap;
 import it.unimi.dsi.fastutil.longs.LongArrayList;
 import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import org.apache.commons.lang.StringUtils;
@@ -16,12 +17,9 @@ import org.apache.lucene.analysis.CharArraySet;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
-import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.Operator;
-import org.elasticsearch.search.SearchHit;
-import org.elasticsearch.search.SearchHits;
 import org.elasticsearch.search.aggregations.Aggregation;
 import org.elasticsearch.search.aggregations.AggregationBuilders;
 import org.elasticsearch.search.aggregations.bucket.terms.ParsedStringTerms;
@@ -33,7 +31,6 @@ import org.snomed.snowstorm.config.SearchLanguagesConfiguration;
 import org.snomed.snowstorm.core.data.domain.*;
 import org.snomed.snowstorm.core.data.services.identifier.IdentifierService;
 import org.snomed.snowstorm.core.data.services.mapper.ConceptToConceptIdMapper;
-import org.snomed.snowstorm.core.data.services.mapper.DescriptionToConceptIdGroupingMapper;
 import org.snomed.snowstorm.core.data.services.mapper.DescriptionToConceptIdMapper;
 import org.snomed.snowstorm.core.data.services.mapper.RefsetMemberToReferenceComponentIdMapper;
 import org.snomed.snowstorm.core.data.services.pojo.DescriptionCriteria;
@@ -46,7 +43,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations;
 import org.springframework.data.elasticsearch.core.SearchResultMapper;
@@ -55,6 +51,7 @@ import org.springframework.data.elasticsearch.core.query.NativeSearchQuery;
 import org.springframework.data.elasticsearch.core.query.NativeSearchQueryBuilder;
 import org.springframework.data.util.CloseableIterator;
 import org.springframework.stereotype.Service;
+import org.springframework.util.CollectionUtils;
 
 import java.io.IOException;
 import java.util.*;
@@ -200,24 +197,29 @@ public class DescriptionService extends ComponentService {
 
 
 		// Fetch all matching description and concept ids
-		Collection<Long> descriptionIdsGroupedByConcept = new LongArrayList();
 		// ids of concepts where all descriptions and concept criteria are met
 		boolean groupByConcept = criteria.isGroupByConcept();
-		Collection<Long> conceptIds = findDescriptionConceptIds(descriptionQuery, criteria.getConceptActive(), criteria.getConceptRefset(), groupByConcept,
-				descriptionIdsGroupedByConcept, branchCriteria);
+		DescriptionMatches descriptionMatches = findDescriptionAndConceptIds(
+				descriptionQuery,
+				criteria.getPreferredIn(),
+				criteria.getAcceptableIn(),
+				criteria.getPreferredOrAcceptableIn(),
+				criteria.getConceptActive(),
+				criteria.getConceptRefset(),
+				groupByConcept,
+				branchCriteria,
+				timer);
 
-		// Apply group by concept clause
+		// Apply group by concept and acceptability filtering
 		BoolQueryBuilder descriptionFilter = boolQuery();
-		if (groupByConcept) {
-			descriptionFilter.must(termsQuery(Description.Fields.DESCRIPTION_ID, descriptionIdsGroupedByConcept));
-		}
-		timer.checkpoint("Fetch all related concept ids for semantic tag aggregation");
+		descriptionFilter.must(termsQuery(Description.Fields.DESCRIPTION_ID, descriptionMatches.getMatchedDescriptionIds()));
 
 
 		// Start fetching aggregations..
 		List<Aggregation> allAggregations = new ArrayList<>();
+		Set<Long> conceptIds = descriptionMatches.getMatchedConceptIds();
 
-		// Fetch FSN aggregation
+		// Fetch FSN semantic tag aggregation
 		BoolQueryBuilder fsnClauses = boolQuery();
 		String semanticTag = criteria.getSemanticTag();
 		boolean semanticTagFiltering = !Strings.isNullOrEmpty(semanticTag);
@@ -478,21 +480,15 @@ public class DescriptionService extends ComponentService {
 		}
 	}
 
-	private Collection<Long> findDescriptionConceptIds(BoolQueryBuilder descriptionCriteria, Boolean conceptActive, String conceptRefset,
-			boolean groupByConcept, Collection<Long> descriptionIdsGroupedByConcept, BranchCriteria branchCriteria) throws TooCostlyException {
+	private DescriptionMatches findDescriptionAndConceptIds(
+			BoolQueryBuilder descriptionCriteria,
+			Set<Long> preferredIn, Set<Long> acceptableIn, Set<Long> preferredOrAcceptableIn,
+			Boolean conceptActive, String conceptRefset,
+			boolean groupByConcept, BranchCriteria branchCriteria, TimerUtil timer) throws TooCostlyException {
 
-		Collection<Long> conceptIds;
-		SearchResultMapper mapper;
-		if (groupByConcept) {
-			// Set used here because unique concepts needed
-			Set<Long> conceptIdsSet = new LongOpenHashSet();
-			conceptIds = conceptIdsSet;
-			mapper = new DescriptionToConceptIdGroupingMapper(conceptIdsSet, descriptionIdsGroupedByConcept);
-		} else {
-			// List used here because it's faster
-			conceptIds = new LongArrayList();
-			mapper = new DescriptionToConceptIdMapper(conceptIds);
-		}
+		// First pass search to collect all description and concept ids.
+		Map<Long, Long> descriptionToConceptMap = new Long2ObjectLinkedOpenHashMap<>();
+		SearchResultMapper mapper = new DescriptionToConceptIdMapper(descriptionToConceptMap);
 		NativeSearchQueryBuilder searchQueryBuilder = new NativeSearchQueryBuilder()
 				.withQuery(descriptionCriteria)
 				.withStoredFields(Description.Fields.DESCRIPTION_ID, Description.Fields.CONCEPT_ID);
@@ -501,6 +497,7 @@ public class DescriptionService extends ComponentService {
 		if (totalElements > aggregationMaxProcessableResultsSize) {
 			throw new TooCostlyException(String.format("There are over %s results. Aggregating these results would be too costly.", aggregationMaxProcessableResultsSize));
 		}
+		timer.checkpoint("Count all check");
 
 		NativeSearchQuery searchQuery = searchQueryBuilder.withPageable(LARGE_PAGE).build();
 		addTermSort(searchQuery);
@@ -508,6 +505,52 @@ public class DescriptionService extends ComponentService {
 				searchQuery, Description.class, mapper)) {
 			stream.forEachRemaining(hit -> {});
 		}
+		timer.checkpoint("Collect all description and concept ids");
+
+		// Second pass to apply lang refset filter
+		if (!CollectionUtils.isEmpty(preferredIn) || !CollectionUtils.isEmpty(acceptableIn) || !CollectionUtils.isEmpty(preferredOrAcceptableIn)) {
+
+			BoolQueryBuilder queryBuilder = boolQuery()
+					.must(branchCriteria.getEntityBranchCriteria(ReferenceSetMember.class))
+					.must(termQuery(ReferenceSetMember.Fields.ACTIVE, true));
+
+			if (!CollectionUtils.isEmpty(preferredIn)) {
+				queryBuilder
+						.must(termsQuery(ReferenceSetMember.Fields.REFSET_ID, preferredIn))
+						.must(termQuery(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID_FIELD_PATH, Concepts.PREFERRED));
+			}
+			if (!CollectionUtils.isEmpty(acceptableIn)) {
+				queryBuilder
+						.must(termsQuery(ReferenceSetMember.Fields.REFSET_ID, acceptableIn))
+						.must(termQuery(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID_FIELD_PATH, Concepts.ACCEPTABLE));
+			}
+			if (!CollectionUtils.isEmpty(preferredOrAcceptableIn)) {
+				queryBuilder
+						.must(termsQuery(ReferenceSetMember.Fields.REFSET_ID, preferredOrAcceptableIn))
+						.must(termsQuery(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID_FIELD_PATH, Sets.newHashSet(Concepts.PREFERRED, Concepts.ACCEPTABLE)));
+			}
+
+			NativeSearchQuery nativeSearchQuery = new NativeSearchQueryBuilder()
+					.withQuery(queryBuilder)
+					.withFilter(termsQuery(ReferenceSetMember.Fields.REFERENCED_COMPONENT_ID, descriptionToConceptMap.keySet()))
+					.withStoredFields(ReferenceSetMember.Fields.REFERENCED_COMPONENT_ID)
+					.withPageable(LARGE_PAGE)
+					.build();
+			List<Long> filteredDescriptionIds = new LongArrayList();
+			try (CloseableIterator<ReferenceSetMember> stream =
+						 elasticsearchTemplate.stream(nativeSearchQuery, ReferenceSetMember.class, new RefsetMemberToReferenceComponentIdMapper(filteredDescriptionIds))) {
+				stream.forEachRemaining(hit -> {});
+			}
+
+			Map<Long, Long> filteredDescriptionToConceptMap = new Long2ObjectLinkedOpenHashMap<>();
+			for (Long descriptionId : filteredDescriptionIds) {
+				filteredDescriptionToConceptMap.put(descriptionId, descriptionToConceptMap.get(descriptionId));
+			}
+			descriptionToConceptMap = filteredDescriptionToConceptMap;
+			timer.checkpoint("Language refset filtering");
+		}
+
+		Set<Long> conceptIds = new LongOpenHashSet(descriptionToConceptMap.values());
 
 		if (!conceptIds.isEmpty()) {
 
@@ -529,6 +572,7 @@ public class DescriptionService extends ComponentService {
 					stream.forEachRemaining(hit -> {
 					});
 				}
+				timer.checkpoint("Concept active filtering");
 			}
 
 			// Apply refset filter
@@ -549,11 +593,24 @@ public class DescriptionService extends ComponentService {
 					stream.forEachRemaining(hit -> {
 					});
 				}
+				timer.checkpoint("Concept refset filtering");
 			}
-
 		}
 
-		return conceptIds;
+		Set<Long> descriptions;
+		if (groupByConcept) {
+			Set<Long> concepts = new LongOpenHashSet();
+			descriptions = new LongOpenHashSet();
+			for (Map.Entry<Long, Long> entry : descriptionToConceptMap.entrySet()) {
+				if (concepts.add(entry.getValue())) {
+					descriptions.add(entry.getKey());
+				}
+			}
+		} else {
+			descriptions = descriptionToConceptMap.keySet();
+		}
+
+		return new DescriptionMatches(descriptions, conceptIds);
 	}
 
 	void addTermClauses(String term, Collection<String> languageCodes, BoolQueryBuilder boolBuilder) {
@@ -653,11 +710,11 @@ public class DescriptionService extends ComponentService {
 			}
 			for (char c : word.toCharArray()) {
 				if (Character.isLetter(c)) {
-					regexBuilder.append("[" + Character.toLowerCase(c) + Character.toUpperCase(c) + "]");
+					regexBuilder.append("[").append(Character.toLowerCase(c)).append(Character.toUpperCase(c)).append("]");
 				} else if (Character.isDigit(c)){
 					regexBuilder.append(c);
 				} else {
-					regexBuilder.append("\\" + c);
+					regexBuilder.append("\\").append(c);
 				}
 			}
 			regexBuilder.append(".*");
@@ -693,12 +750,32 @@ public class DescriptionService extends ComponentService {
 			this.tagCounts = tagCounts;
 		}
 
-		public long getBranchHeadTime() {
+		private long getBranchHeadTime() {
 			return branchHeadTime;
 		}
 
-		public Map<String, Long> getTagCounts() {
+		private Map<String, Long> getTagCounts() {
 			return tagCounts;
 		}
+	}
+
+	private static class DescriptionMatches {
+
+		private final Set<Long> conceptIds;
+		private final Set<Long> descriptionIds;
+
+		private DescriptionMatches(Set<Long> descriptionIds, Set<Long> conceptIds) {
+			this.descriptionIds = descriptionIds;
+			this.conceptIds = conceptIds;
+		}
+
+		private Set<Long> getMatchedDescriptionIds() {
+			return descriptionIds;
+		}
+
+		private Set<Long> getMatchedConceptIds() {
+			return conceptIds;
+		}
+
 	}
 }

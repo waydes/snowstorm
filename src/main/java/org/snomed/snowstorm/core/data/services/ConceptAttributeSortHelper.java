@@ -22,6 +22,8 @@ import static java.lang.Long.parseLong;
 @Service
 public class ConceptAttributeSortHelper {
 
+	public static final int NEXT_GROUP_DEFAULT = 50;
+
 	@Autowired
 	private SortOrderProperties sortOrderProperties;
 
@@ -40,11 +42,11 @@ public class ConceptAttributeSortHelper {
 	private static final Comparator<Relationship> ACTIVE_RELATIONSHIP_COMPARATOR_WITH_GROUP_LAST = Comparator
 			.comparing(Relationship::getAttributeOrder, Comparator.nullsLast(Short::compareTo))
 			.thenComparing(Relationship::getTargetFsn, Comparator.nullsLast(String::compareTo))
-			.thenComparing(Relationship::getGroupId);
+			.thenComparing(Relationship::getGroupOrder);
 
 	private static final Comparator<Relationship> RELATIONSHIP_COMPARATOR = Comparator
 			.comparing(Relationship::isActive).reversed()
-			.thenComparing(Relationship::getGroupId)
+			.thenComparing(Relationship::getGroupOrder)
 			.thenComparing(Relationship::getAttributeOrder, Comparator.nullsLast(Short::compareTo))
 			.thenComparing(Relationship::getTargetFsn, Comparator.nullsLast(String::compareTo))
 			.thenComparing(Relationship::getTypeId, Comparator.nullsLast(String::compareTo))
@@ -191,7 +193,9 @@ public class ConceptAttributeSortHelper {
 			int groupId = relationship.getGroupId();
 			if (groupId != 0) {
 				if (!oldGroupToNewGroupMap.keySet().contains(groupId)) {
-					oldGroupToNewGroupMap.put(groupId, group++);
+					group++;
+					boolean isSelfGrouped = isSeflGroupedAtrributes(groupId, sortedUngroupedRelationships);
+					oldGroupToNewGroupMap.put(groupId, isSelfGrouped ? group : group + NEXT_GROUP_DEFAULT);
 				}
 			}
 		}
@@ -199,7 +203,7 @@ public class ConceptAttributeSortHelper {
 		Set<Relationship> sortedRelationships = new TreeSet<>(RELATIONSHIP_COMPARATOR);
 		for (Relationship relationship : relationships) {
 			if (relationship.getGroupId() != 0 && oldGroupToNewGroupMap.containsKey(relationship.getGroupId())) {
-				relationship.setGroupId(oldGroupToNewGroupMap.get(relationship.getGroupId()));
+				relationship.setGroupOrder(oldGroupToNewGroupMap.get(relationship.getGroupId()));
 			}
 			sortedRelationships.add(relationship);
 		}
@@ -210,6 +214,16 @@ public class ConceptAttributeSortHelper {
 
 		return new LinkedHashSet<>(sortedRelationships);
 	}
+
+    private boolean isSeflGroupedAtrributes(int groupId, Set<Relationship> relationshipSet) {
+	    int count = 0;
+        for (Relationship relationship : relationshipSet) {
+            if (relationship.getGroupId() == groupId) {
+                count++;
+            }
+        }
+        return count == 1;
+    }
 
 	Map<String, String> getSubHierarchyToTopLevelTagCache() {
 		return subHierarchyToTopLevelTagCache;

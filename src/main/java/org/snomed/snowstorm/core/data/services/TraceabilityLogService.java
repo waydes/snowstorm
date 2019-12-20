@@ -1,5 +1,6 @@
 package org.snomed.snowstorm.core.data.services;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.kaicode.elasticvc.api.BranchService;
@@ -18,6 +19,7 @@ import org.snomed.snowstorm.core.data.services.pojo.PersistedComponents;
 import org.snomed.snowstorm.core.data.services.traceability.Activity;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import org.springframework.jms.core.JmsTemplate;
 import org.springframework.stereotype.Service;
 
@@ -56,7 +58,9 @@ public class TraceabilityLogService implements CommitListener {
 	private final Logger logger = LoggerFactory.getLogger(getClass());
 
 	public TraceabilityLogService() {
-		objectMapper = new ObjectMapper();
+		objectMapper = Jackson2ObjectMapperBuilder.json()
+				.serializationInclusion(JsonInclude.Include.NON_NULL)
+				.build();
 		activityConsumer = activity -> jmsTemplate.convertAndSend(jmsQueuePrefix + ".traceability", activity);
 	}
 
@@ -111,12 +115,19 @@ public class TraceabilityLogService implements CommitListener {
 		for (ReferenceSetMember refsetMember : persistedReferenceSetMembers) {
 			if (refsetMember.isChanged() || refsetMember.isDeleted()) {
 				String referencedComponentId = refsetMember.getReferencedComponentId();
+				String componentId = referencedComponentId;
 				long referencedComponentLong = parseLong(referencedComponentId);
 				Activity.ConceptActivity conceptActivity = null;
 				String componentType = null;
 				if (IdentifierService.isConceptId(referencedComponentId)) {
 					conceptActivity = activityMap.get(referencedComponentLong);
-					componentType = "Concept";
+					Map<String, String> additionalFields = refsetMember.getAdditionalFields();
+					if (additionalFields != null && additionalFields.size() == 1 && additionalFields.keySet().contains(ReferenceSetMember.OwlExpressionFields.OWL_EXPRESSION)) {
+						componentType = "OWLAxiom";
+						componentId = refsetMember.getMemberId();
+					} else {
+						componentType = "Concept";
+					}
 				} else {
 					Long conceptId = componentToConceptIdMap.get(referencedComponentLong);
 					if (IdentifierService.isDescriptionId(referencedComponentId)) {
@@ -131,7 +142,7 @@ public class TraceabilityLogService implements CommitListener {
 				if (conceptActivity != null && componentType != null) {
 					conceptActivity.addComponentChange(new Activity.ComponentChange(
 							componentType,
-							referencedComponentId,
+							componentId,
 							"UPDATE"))
 							.statedChange();
 				}

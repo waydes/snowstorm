@@ -501,6 +501,9 @@ public class ConceptServiceTest extends AbstractTest {
 		conceptService.batchCreate(Lists.newArrayList(new Concept("107658001"), new Concept("116680003")), path);
 		final Concept concept = new Concept("50960005", 20020131, true, "900000000000207008", "900000000000074008");
 		concept.addDescription(new Description("84923010", 20020131, true, "900000000000207008", "50960005", "en", "900000000000013009", "Bleeding", "900000000000020002"));
+		Description inactiveDescriptionCreate = new Description("Another");
+		inactiveDescriptionCreate.setActive(false);
+		concept.addDescription(inactiveDescriptionCreate);
 		concept.addRelationship(new Relationship(ISA, "107658001"));
 		Concept savedConcept = conceptService.create(concept, path);
 
@@ -549,9 +552,15 @@ public class ConceptServiceTest extends AbstractTest {
 		assertEquals(concept.getId(), associationTargetMember.getReferencedComponentId());
 		assertEquals("87100004", associationTargetMember.getAdditionalField("targetComponentId"));
 
-		Description description = inactiveConcept.getDescriptions().iterator().next();
-		assertTrue("Description is still active", description.isActive());
-		assertEquals("Description automatically has inactivation indicator", "CONCEPT_NON_CURRENT", description.getInactivationIndicator());
+		Set<Description> descriptions = inactiveConcept.getDescriptions();
+		Optional<Description> activeDescription = descriptions.stream().filter(Description::isActive).findFirst();
+		assertTrue("One description is still active", activeDescription.isPresent());
+		assertEquals("Active description automatically has inactivation indicator", "CONCEPT_NON_CURRENT", activeDescription.get().getInactivationIndicator());
+
+		// Assert that inactive descriptions also have concept non current indicator applied automatically too.
+		Optional<Description> inactiveDescription = descriptions.stream().filter(d -> !d.isActive()).findFirst();
+		assertTrue("One description is still inactive", inactiveDescription.isPresent());
+		assertEquals("Inactive description automatically has inactivation indicator", "CONCEPT_NON_CURRENT", inactiveDescription.get().getInactivationIndicator());
 
 		assertFalse("Relationship is inactive.", inactiveConcept.getRelationships().iterator().next().isActive());
 
@@ -805,7 +814,8 @@ public class ConceptServiceTest extends AbstractTest {
 		// Create concept
 		final Concept concept = new Concept(conceptId, null, true, originalModuleId, "900000000000074008")
 				.addDescription(new Description("10000013", null, true, originalModuleId, conceptId, "en",
-						Concepts.FSN, "Pizza", Concepts.CASE_INSENSITIVE).addLanguageRefsetMember(Concepts.GB_EN_LANG_REFSET, Concepts.PREFERRED));
+						Concepts.FSN, "Pizza", Concepts.CASE_INSENSITIVE).addLanguageRefsetMember(Concepts.GB_EN_LANG_REFSET, Concepts.PREFERRED))
+				.addRelationship(new Relationship(ISA, SNOMEDCT_ROOT).setInferred(true));
 		conceptService.create(concept, path);
 
 		// Run release process
@@ -828,10 +838,12 @@ public class ConceptServiceTest extends AbstractTest {
 		assertEquals(effectiveTime, savedMember.getReleasedEffectiveTime());
 		assertEquals("true|900000000000207008|acceptabilityId|900000000000548007", savedMember.getReleaseHash());
 
-		// Change concept, description and member
+		// Change concept, description, member and relationship
 		savedConcept.setModuleId("10000123");
 		savedDescription.setCaseSignificanceId(Concepts.ENTIRE_TERM_CASE_SENSITIVE);
 		savedMember.setAdditionalField(ReferenceSetMember.LanguageFields.ACCEPTABILITY_ID, Concepts.ACCEPTABLE);
+		Relationship savedRelationship = savedConcept.getRelationships().iterator().next();
+		savedRelationship.setGroupId(1);
 		conceptService.update(savedConcept, "MAIN");
 
 		// effectiveTimes cleared
@@ -842,6 +854,7 @@ public class ConceptServiceTest extends AbstractTest {
 		Description descriptionAfterUpdate = conceptAfterUpdate.getDescriptions().iterator().next();
 		Assert.assertNull(descriptionAfterUpdate.getEffectiveTimeI());
 		Assert.assertNull(descriptionAfterUpdate.getLangRefsetMembers().values().iterator().next().getEffectiveTimeI());
+		Assert.assertNull(conceptAfterUpdate.getRelationships().iterator().next().getEffectiveTimeI());
 
 		// Change concept back
 		conceptAfterUpdate.setModuleId(originalModuleId);
@@ -870,6 +883,16 @@ public class ConceptServiceTest extends AbstractTest {
 		conceptWithRestoredDate = conceptService.find(conceptId, path);
 		ReferenceSetMember memberWithRestoredDate = conceptWithRestoredDate.getDescriptions().iterator().next().getLangRefsetMembers().values().iterator().next();
 		assertEquals(effectiveTime, memberWithRestoredDate.getEffectiveTimeI());
+
+		// Change relationship back
+		assertEquals(1, conceptWithRestoredDate.getRelationships().size());
+		Relationship relationship = conceptWithRestoredDate.getRelationships().iterator().next();
+		assertNull(relationship.getEffectiveTimeI());
+		relationship.setReleasedEffectiveTime(null);// Clear fields to simulate an API call.
+		relationship.setReleaseHash(null);
+		relationship.setGroupId(0);
+		Concept updatedConceptFromResponse = conceptService.update(conceptWithRestoredDate, "MAIN");
+		assertNotNull(updatedConceptFromResponse.getRelationships().iterator().next().getEffectiveTimeI());
 	}
 
 	@Test
@@ -925,7 +948,7 @@ public class ConceptServiceTest extends AbstractTest {
 		String conceptId = "100001";
 
 		// Concept on MAIN with 1 description
-		Concept concept = testUtil.createConceptWithPathIdAndTerm("MAIN", conceptId, "Heart");
+		testUtil.createConceptWithPathIdAndTerm("MAIN", conceptId, "Heart");
 
 		// Create branch A
 		branchService.create("MAIN/A");
